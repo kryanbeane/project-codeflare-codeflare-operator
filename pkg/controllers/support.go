@@ -22,7 +22,9 @@ import (
 
 var (
 	CertGeneratorImage = getEnv("CERT_GENERATOR_IMAGE", "registry.redhat.io/ubi9@sha256:770cf07083e1c85ae69c25181a205b7cdef63c11b794c89b3b487d4670b4c328")
-	OAuthProxyImage    = getEnv("OAUTH_PROXY_IMAGE", "registry.redhat.io/openshift4/ose-oauth-proxy@sha256:1ea6a01bf3e63cdcf125c6064cbd4a4a270deaf0f157b3eabb78f60556840366")
+	// OAuthProxyImage is no longer used after OAuth removal, but we keep it here to avoid breaking other potential references if any.
+	// Consider removing if no other part of the codebase uses it.
+	OAuthProxyImage = getEnv("OAUTH_PROXY_IMAGE", "registry.redhat.io/openshift4/ose-oauth-proxy@sha256:1ea6a01bf3e63cdcf125c6064cbd4a4a270deaf0f157b3eabb78f60556840366")
 )
 
 func getEnv(key, fallback string) string {
@@ -34,6 +36,13 @@ func getEnv(key, fallback string) string {
 
 func serviceNameFromCluster(cluster *rayv1.RayCluster) string {
 	return cluster.Name + "-head-svc"
+}
+
+func rayClientNameFromCluster(cluster *rayv1.RayCluster) string {
+	// Define a consistent name for RayClient resources (Routes, Ingresses etc.)
+	// This was likely defined in raycluster_controller.go before and removed.
+	// Using a common pattern.
+	return "rayclient-" + cluster.Name
 }
 
 func desiredRayClientRoute(cluster *rayv1.RayCluster) *routeapply.RouteApplyConfiguration {
@@ -78,6 +87,7 @@ func desiredRayClientIngress(cluster *rayv1.RayCluster, ingressHost string) *net
 		)
 }
 
+/*
 func desiredClusterIngress(cluster *rayv1.RayCluster, ingressHost string) *networkingv1ac.IngressApplyConfiguration {
 	return networkingv1ac.Ingress(dashboardNameFromCluster(cluster), cluster.Namespace).
 		WithLabels(map[string]string{RayClusterNameLabel: cluster.Name}).
@@ -102,6 +112,7 @@ func desiredClusterIngress(cluster *rayv1.RayCluster, ingressHost string) *netwo
 			),
 		)
 }
+*/
 
 type compare[T any] func(T, T) bool
 

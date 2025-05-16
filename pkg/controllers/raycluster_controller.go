@@ -20,10 +20,8 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
-	"crypto/sha1"
 	"crypto/x509"
 	"crypto/x509/pkix"
-	"encoding/base64"
 	"encoding/pem"
 	"fmt"
 	"math/big"
@@ -43,7 +41,6 @@ import (
 	corev1ac "k8s.io/client-go/applyconfigurations/core/v1"
 	metav1ac "k8s.io/client-go/applyconfigurations/meta/v1"
 	networkingv1ac "k8s.io/client-go/applyconfigurations/networking/v1"
-	rbacv1ac "k8s.io/client-go/applyconfigurations/rbac/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -53,7 +50,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	routev1 "github.com/openshift/api/route/v1"
-	routev1ac "github.com/openshift/client-go/route/applyconfigurations/route/v1"
 	routev1client "github.com/openshift/client-go/route/clientset/versioned/typed/route/v1"
 
 	"github.com/project-codeflare/codeflare-operator/pkg/config"
@@ -165,6 +161,39 @@ func (r *RayClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, nil
 	}
 
+	// Check if the RayCluster is suspended, and if so, do nothing
+	if isRayClusterSuspended(cluster) {
+		// If the RayCluster is suspended, we should delete any existing NetworkPolicy.
+		// OAuth resources are no longer managed by CFO.
+		// RayClient Route deletion is removed for now as its naming function was removed.
+		// TODO: Add similar cleanup for non-OpenShift environments for NetworkPolicy if needed.
+		if r.IsOpenShift {
+			// Delete NetworkPolicy for head
+			headNetworkPolicy := &networkingv1.NetworkPolicy{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      headNWPNameFromCluster(cluster),
+					Namespace: cluster.Namespace,
+				},
+			}
+			if err := r.Client.Delete(ctx, headNetworkPolicy); err != nil && !errors.IsNotFound(err) {
+				logger.Error(err, "Failed to delete head NetworkPolicy for suspended cluster")
+			}
+
+			// Delete NetworkPolicy for workers
+			workerNetworkPolicy := &networkingv1.NetworkPolicy{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      workerNWPNameFromCluster(cluster),
+					Namespace: cluster.Namespace,
+				},
+			}
+			if err := r.Client.Delete(ctx, workerNetworkPolicy); err != nil && !errors.IsNotFound(err) {
+				logger.Error(err, "Failed to delete worker NetworkPolicy for suspended cluster")
+			}
+		}
+		logger.Info("RayCluster is suspended, OAuth resources are no longer managed by CFO, other resources cleaned up if necessary.")
+		return ctrl.Result{}, nil
+	}
+
 	if isMTLSEnabled(r.Config) {
 		caSecretName := caSecretNameFromCluster(cluster)
 		caSecret, err := r.kubeClient.CoreV1().Secrets(cluster.Namespace).Get(ctx, caSecretName, metav1.GetOptions{})
@@ -193,83 +222,14 @@ func (r *RayClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		}
 	}
 
-	if !isRayClusterSuspended(cluster) && isRayDashboardOAuthEnabled(r.Config) && r.IsOpenShift {
-		logger.Info("Creating OAuth Objects")
-		_, err := r.routeClient.Routes(cluster.Namespace).Apply(ctx, desiredClusterRoute(cluster), metav1.ApplyOptions{FieldManager: controllerName, Force: true})
-		if err != nil {
-			logger.Error(err, "Failed to update OAuth Route")
-			return ctrl.Result{RequeueAfter: requeueTime}, err
-		}
-
-		_, err = r.kubeClient.CoreV1().Secrets(cluster.Namespace).Apply(ctx, desiredOAuthSecret(cluster, r.CookieSalt), metav1.ApplyOptions{FieldManager: controllerName, Force: true})
-		if err != nil {
-			logger.Error(err, "Failed to create OAuth Secret")
-			return ctrl.Result{RequeueAfter: requeueTime}, err
-		}
-
-		_, err = r.kubeClient.CoreV1().Services(cluster.Namespace).Apply(ctx, desiredOAuthService(cluster), metav1.ApplyOptions{FieldManager: controllerName, Force: true})
-		if err != nil {
-			logger.Error(err, "Failed to update OAuth Service")
-			return ctrl.Result{RequeueAfter: requeueTime}, err
-		}
-
-		_, err = r.kubeClient.CoreV1().ServiceAccounts(cluster.Namespace).Apply(ctx, desiredServiceAccount(cluster), metav1.ApplyOptions{FieldManager: controllerName, Force: true})
-		if err != nil {
-			logger.Error(err, "Failed to update OAuth ServiceAccount")
-			return ctrl.Result{RequeueAfter: requeueTime}, err
-		}
-
-		if len(cluster.Spec.HeadGroupSpec.Template.Spec.ImagePullSecrets) == 0 {
-			// Delete head pod only if user doesn't specify own imagePullSecrets and imagePullSecrets from OAuth ServiceAccount are not present in the head Pod
-			if err := r.deleteHeadPodIfMissingImagePullSecrets(ctx, cluster); err != nil {
-				return ctrl.Result{RequeueAfter: requeueTime}, err
-			}
-		}
-
-		_, err = r.kubeClient.RbacV1().ClusterRoleBindings().Apply(ctx, desiredOAuthClusterRoleBinding(cluster), metav1.ApplyOptions{FieldManager: controllerName, Force: true})
-		if err != nil {
-			logger.Error(err, "Failed to update OAuth ClusterRoleBinding")
-			return ctrl.Result{RequeueAfter: requeueTime}, err
-		}
-
-		logger.Info("Creating RayClient Route")
-		_, err = r.routeClient.Routes(cluster.Namespace).Apply(ctx, desiredRayClientRoute(cluster), metav1.ApplyOptions{FieldManager: controllerName, Force: true})
-		if err != nil {
-			logger.Error(err, "Failed to update RayClient Route")
-			return ctrl.Result{RequeueAfter: requeueTime}, err
-		}
-
-	} else if !isRayClusterSuspended(cluster) && !isRayDashboardOAuthEnabled(r.Config) && !r.IsOpenShift {
-		logger.Info("We detected being on Vanilla Kubernetes!")
-		logger.Info("Creating Dashboard Ingress")
-		dashboardName := dashboardNameFromCluster(cluster)
-		dashboardIngressHost, err := getIngressHost(r.Config, cluster, dashboardName)
-		if err != nil {
-			return ctrl.Result{RequeueAfter: requeueTime}, err
-		}
-		_, err = r.kubeClient.NetworkingV1().Ingresses(cluster.Namespace).Apply(ctx, desiredClusterIngress(cluster, dashboardIngressHost), metav1.ApplyOptions{FieldManager: controllerName, Force: true})
-		if err != nil {
-			// This log is info level since errors are not fatal and are expected
-			logger.Info("WARN: Failed to update Dashboard Ingress", "error", err.Error(), logRequeueing, true)
-			return ctrl.Result{RequeueAfter: requeueTime}, err
-		}
-		logger.Info("Creating RayClient Ingress")
-		rayClientName := rayClientNameFromCluster(cluster)
-		rayClientIngressHost, err := getIngressHost(r.Config, cluster, rayClientName)
-		if err != nil {
-			return ctrl.Result{RequeueAfter: requeueTime}, err
-		}
-		_, err = r.kubeClient.NetworkingV1().Ingresses(cluster.Namespace).Apply(ctx, desiredRayClientIngress(cluster, rayClientIngressHost), metav1.ApplyOptions{FieldManager: controllerName, Force: true})
-		if err != nil {
-			logger.Error(err, "Failed to update RayClient Ingress")
-			return ctrl.Result{RequeueAfter: requeueTime}, err
-		}
-	}
+	// The following block for OpenShift specific OAuth setup is removed.
+	// Dashboard access will now rely on KubeRay's RBAC proxy.
+	// if !isRayClusterSuspended(cluster) && isRayDashboardOAuthEnabled(r.Config) && r.IsOpenShift { ... }
+	// else if !isRayClusterSuspended(cluster) && !isRayDashboardOAuthEnabled(r.Config) && !r.IsOpenShift { ... }
+	logger.Info("Skipping CFO-specific dashboard authentication setup. Dashboard access will rely on KubeRay RBAC proxy if KubeRay auth is enabled.")
 
 	// Locate the KubeRay operator deployment:
-	// - First try to get the ODH / RHOAI application namespace from the DSCInitialization
-	// - Or fallback to the well-known defaults
-	// add check if running on openshift or vanilla kubernetes
+	// Attempt to find KubeRay operator by well-known labels
 	kubeRayNamespace, err := r.getKubeRayOperatorNamespace(ctx)
 	if err != nil {
 		logger.Error(err, "Failed to get KubeRay operator namespace")
@@ -319,10 +279,6 @@ func getIngressHost(cfg *config.KubeRayConfiguration, cluster *rayv1.RayCluster,
 	return fmt.Sprintf("%s-%s.%s", ingressNameFromCluster, cluster.Namespace, ingressDomain), nil
 }
 
-func isRayDashboardOAuthEnabled(cfg *config.KubeRayConfiguration) bool {
-	return cfg == nil || ptr.Deref(cfg.RayDashboardOAuthEnabled, true)
-}
-
 func isMTLSEnabled(cfg *config.KubeRayConfiguration) bool {
 	return cfg == nil || ptr.Deref(cfg.MTLSEnabled, true)
 }
@@ -362,116 +318,6 @@ func crbNameFromCluster(cluster *rayv1.RayCluster) string {
 		return cluster.Name + "-" + cluster.Namespace + "-auth"
 	}
 	return RCCUniqueName(cluster.Name + "-" + cluster.Namespace + "-auth")
-}
-
-func desiredOAuthClusterRoleBinding(cluster *rayv1.RayCluster) *rbacv1ac.ClusterRoleBindingApplyConfiguration {
-	return rbacv1ac.ClusterRoleBinding(
-		crbNameFromCluster(cluster)).
-		WithLabels(map[string]string{RayClusterNameLabel: cluster.Name, "ray.openshift.ai/cluster-namespace": cluster.Namespace}).
-		WithSubjects(
-			rbacv1ac.Subject().
-				WithKind("ServiceAccount").
-				WithName(oauthServiceAccountNameFromCluster(cluster)).
-				WithNamespace(cluster.Namespace),
-		).
-		WithRoleRef(
-			rbacv1ac.RoleRef().
-				WithAPIGroup("rbac.authorization.k8s.io").
-				WithKind("ClusterRole").
-				WithName("system:auth-delegator"),
-		)
-}
-
-func oauthServiceAccountNameFromCluster(cluster *rayv1.RayCluster) string {
-	if shouldUseOldName(cluster) {
-		return cluster.Name + "-oauth-proxy"
-	}
-	return RCCUniqueName(cluster.Name + "-oauth-proxy")
-}
-
-func desiredServiceAccount(cluster *rayv1.RayCluster) *corev1ac.ServiceAccountApplyConfiguration {
-	return corev1ac.ServiceAccount(oauthServiceAccountNameFromCluster(cluster), cluster.Namespace).
-		WithLabels(map[string]string{RayClusterNameLabel: cluster.Name}).
-		WithAnnotations(map[string]string{
-			"serviceaccounts.openshift.io/oauth-redirectreference.first": "" +
-				`{"kind":"OAuthRedirectReference","apiVersion":"v1",` +
-				`"reference":{"kind":"Route","name":"` + dashboardNameFromCluster(cluster) + `"}}`,
-		}).
-		WithOwnerReferences(ownerRefForRayCluster(cluster))
-}
-
-func dashboardNameFromCluster(cluster *rayv1.RayCluster) string {
-	return "ray-dashboard-" + cluster.Name
-}
-
-func rayClientNameFromCluster(cluster *rayv1.RayCluster) string {
-	return "rayclient-" + cluster.Name
-}
-
-func desiredClusterRoute(cluster *rayv1.RayCluster) *routev1ac.RouteApplyConfiguration {
-	return routev1ac.Route(dashboardNameFromCluster(cluster), cluster.Namespace).
-		WithLabels(map[string]string{RayClusterNameLabel: cluster.Name}).
-		WithSpec(routev1ac.RouteSpec().
-			WithTo(routev1ac.RouteTargetReference().WithKind("Service").WithName(oauthServiceNameFromCluster(cluster))).
-			WithPort(routev1ac.RoutePort().WithTargetPort(intstr.FromString((oAuthServicePortName)))).
-			WithTLS(routev1ac.TLSConfig().
-				WithInsecureEdgeTerminationPolicy(routev1.InsecureEdgeTerminationPolicyRedirect).
-				WithTermination(routev1.TLSTerminationReencrypt),
-			),
-		).
-		WithOwnerReferences(ownerRefForRayCluster(cluster))
-}
-
-func oauthServiceNameFromCluster(cluster *rayv1.RayCluster) string {
-	if shouldUseOldName(cluster) {
-		return cluster.Name + "-oauth"
-	}
-	return RCCUniqueName(cluster.Name + "-oauth")
-}
-
-func oauthServiceTLSSecretName(cluster *rayv1.RayCluster) string {
-	if shouldUseOldName(cluster) {
-		return cluster.Name + "-proxy-tls-secret"
-	}
-	return RCCUniqueName(cluster.Name + "-proxy-tls-secret")
-}
-
-func desiredOAuthService(cluster *rayv1.RayCluster) *corev1ac.ServiceApplyConfiguration {
-	return corev1ac.Service(oauthServiceNameFromCluster(cluster), cluster.Namespace).
-		WithLabels(map[string]string{RayClusterNameLabel: cluster.Name}).
-		WithAnnotations(map[string]string{"service.beta.openshift.io/serving-cert-secret-name": oauthServiceTLSSecretName(cluster)}).
-		WithSpec(
-			corev1ac.ServiceSpec().
-				WithPorts(
-					corev1ac.ServicePort().
-						WithName(oAuthServicePortName).
-						WithPort(oAuthServicePort).
-						WithTargetPort(intstr.FromString(oAuthServicePortName)).
-						WithProtocol(corev1.ProtocolTCP),
-				).
-				WithSelector(map[string]string{"ray.io/cluster": cluster.Name, "ray.io/node-type": "head"}),
-		).
-		WithOwnerReferences(ownerRefForRayCluster(cluster))
-}
-
-func oauthSecretNameFromCluster(cluster *rayv1.RayCluster) string {
-	if shouldUseOldName(cluster) {
-		return cluster.Name + "-oauth-config"
-	}
-	return RCCUniqueName(cluster.Name + "-oauth-config")
-}
-
-// desiredOAuthSecret defines the desired OAuth secret object
-func desiredOAuthSecret(cluster *rayv1.RayCluster, cookieSalt string) *corev1ac.SecretApplyConfiguration {
-	// Generate the cookie secret for the OAuth proxy
-	hasher := sha1.New() // REVIEW is SHA1 okay here?
-	hasher.Write([]byte(cluster.Name + cookieSalt))
-	cookieSecret := base64.StdEncoding.EncodeToString(hasher.Sum(nil))
-
-	return corev1ac.Secret(oauthSecretNameFromCluster(cluster), cluster.Namespace).
-		WithLabels(map[string]string{RayClusterNameLabel: cluster.Name}).
-		WithStringData(map[string]string{"cookie_secret": cookieSecret}).
-		WithOwnerReferences(ownerRefForRayCluster(cluster))
 }
 
 func caSecretNameFromCluster(cluster *rayv1.RayCluster) string {
@@ -622,32 +468,39 @@ func desiredHeadNetworkPolicy(cluster *rayv1.RayCluster, cfg *config.KubeRayConf
 }
 
 func (r *RayClusterReconciler) deleteHeadPodIfMissingImagePullSecrets(ctx context.Context, cluster *rayv1.RayCluster) error {
-	serviceAccount, err := r.kubeClient.CoreV1().ServiceAccounts(cluster.Namespace).Get(ctx, oauthServiceAccountNameFromCluster(cluster), metav1.GetOptions{})
-	if err != nil {
-		return fmt.Errorf("failed to get OAuth ServiceAccount: %w", err)
-	}
-
-	headPod, err := getHeadPod(ctx, r, cluster)
-	if err != nil {
-		return fmt.Errorf("failed to get head pod: %w", err)
-	}
-
-	if headPod == nil {
-		return nil
-	}
-
-	missingSecrets := map[string]bool{}
-	for _, secret := range serviceAccount.ImagePullSecrets {
-		missingSecrets[secret.Name] = true
-	}
-	for _, secret := range headPod.Spec.ImagePullSecrets {
-		delete(missingSecrets, secret.Name)
-	}
-	if len(missingSecrets) > 0 {
-		if err := r.kubeClient.CoreV1().Pods(headPod.Namespace).Delete(ctx, headPod.Name, metav1.DeleteOptions{}); err != nil {
-			return fmt.Errorf("failed to delete head pod: %w", err)
+	// This function's logic was tied to an OAuth ServiceAccount which is now removed.
+	// Commenting out the original logic. This function may need to be refactored or removed entirely
+	// if image pull secret handling is still required from a different source.
+	/*
+		serviceAccount, err := r.kubeClient.CoreV1().ServiceAccounts(cluster.Namespace).Get(ctx, oauthServiceAccountNameFromCluster(cluster), metav1.GetOptions{})
+		if err != nil {
+			return fmt.Errorf("failed to get OAuth ServiceAccount: %w", err)
 		}
-	}
+
+		headPod, err := getHeadPod(ctx, r, cluster)
+		if err != nil {
+			return fmt.Errorf("failed to get head pod: %w", err)
+		}
+
+		if headPod == nil {
+			return nil
+		}
+
+		missingSecrets := map[string]bool{}
+		for _, secret := range serviceAccount.ImagePullSecrets {
+			missingSecrets[secret.Name] = true
+		}
+		for _, secret := range headPod.Spec.ImagePullSecrets {
+			delete(missingSecrets, secret.Name)
+		}
+		if len(missingSecrets) > 0 {
+			if err := r.kubeClient.CoreV1().Pods(headPod.Namespace).Delete(ctx, headPod.Name, metav1.DeleteOptions{}); err != nil {
+				return fmt.Errorf("failed to delete head pod: %w", err)
+			}
+		}
+	*/
+	logger := ctrl.LoggerFrom(ctx)
+	logger.Info("deleteHeadPodIfMissingImagePullSecrets: OAuth related logic removed/commented out.")
 	return nil
 }
 

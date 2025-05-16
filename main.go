@@ -144,9 +144,8 @@ func main() {
 			LeaderElection: &configv1alpha1.LeaderElectionConfiguration{},
 		},
 		KubeRay: &config.KubeRayConfiguration{
-			RayDashboardOAuthEnabled: ptr.To(true),
-			IngressDomain:            "",
-			MTLSEnabled:              ptr.To(true),
+			IngressDomain: "",
+			MTLSEnabled:   ptr.To(true),
 		},
 		AppWrapper: &config.AppWrapperConfiguration{
 			Enabled: ptr.To(false),

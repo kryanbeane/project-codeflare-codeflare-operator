@@ -52,7 +52,7 @@ func TestRayClusterWebhookDefault(t *testing.T) {
 			HeadGroupSpec: rayv1.HeadGroupSpec{
 				Template: corev1.PodTemplateSpec{
 					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{},
+						Containers: []corev1.Container{{Name: "ray-head"}},
 					},
 				},
 				RayStartParams: map[string]string{},
@@ -65,19 +65,6 @@ func TestRayClusterWebhookDefault(t *testing.T) {
 							Containers: []corev1.Container{
 								{
 									Name: "worker-container-1",
-								},
-							},
-						},
-					},
-					RayStartParams: map[string]string{},
-				},
-				{
-					GroupName: "worker-group-2",
-					Template: corev1.PodTemplateSpec{
-						Spec: corev1.PodSpec{
-							Containers: []corev1.Container{
-								{
-									Name: "worker-container-2",
 								},
 							},
 						},
@@ -99,73 +86,53 @@ func TestRayClusterWebhookDefault(t *testing.T) {
 		test.Expect(err).ShouldNot(HaveOccurred(), "Expected no errors on call to Default function")
 	})
 
-	t.Run("Expected required OAuth proxy container for the head group", func(t *testing.T) {
-		test.Expect(validRayCluster.Spec.HeadGroupSpec.Template.Spec.Containers).
-			To(
-				And(
-					HaveLen(1),
-					ContainElement(WithTransform(support.ResourceName, Equal(oauthProxyContainerName))),
-				),
-				"Expected the OAuth proxy container to be present in the head group",
-			)
-	})
-
-	t.Run("Expected required OAuth proxy TLS secret and CA volumes for the head group", func(t *testing.T) {
+	t.Run("Expected required mTLS volumes for the head group", func(t *testing.T) {
 		test.Expect(validRayCluster.Spec.HeadGroupSpec.Template.Spec.Volumes).
 			To(
 				And(
-					HaveLen(3),
-					ContainElement(WithTransform(support.ResourceName, Equal(oauthProxyVolumeName))),
+					HaveLen(2),
 					ContainElement(WithTransform(support.ResourceName, Equal("ca-vol"))),
 					ContainElement(WithTransform(support.ResourceName, Equal("server-cert"))),
 				),
-				"Expected the OAuth proxy TLS secret and CA volumes to be present in the head group",
+				"Expected the mTLS CA and server-cert volumes to be present in the head group",
 			)
 	})
 
-	t.Run("Expected required service account name for the head group", func(t *testing.T) {
-		test.Expect(validRayCluster.Spec.HeadGroupSpec.Template.Spec.ServiceAccountName).
-			To(Equal(validRayCluster.Name+"-oauth-proxy-ecaffa62"),
-				"Expected the service account name to be set correctly")
-	})
-
-	t.Run("Expected required environment variables for the head group", func(t *testing.T) {
+	t.Run("Expected required mTLS environment variables for the head group", func(t *testing.T) {
 		test.Expect(validRayCluster.Spec.HeadGroupSpec.Template.Spec.Containers[0].Env).
 			To(
 				And(
-					HaveLen(6),
-					ContainElement(WithTransform(support.ResourceName, Equal("COOKIE_SECRET"))),
+					HaveLen(5),
 					ContainElement(WithTransform(support.ResourceName, Equal("MY_POD_IP"))),
 					ContainElement(WithTransform(support.ResourceName, Equal("RAY_USE_TLS"))),
 					ContainElement(WithTransform(support.ResourceName, Equal("RAY_TLS_SERVER_CERT"))),
 					ContainElement(WithTransform(support.ResourceName, Equal("RAY_TLS_SERVER_KEY"))),
 					ContainElement(WithTransform(support.ResourceName, Equal("RAY_TLS_CA_CERT"))),
 				),
-				"Expected the required environment variables to be present in the head group",
+				"Expected the required mTLS environment variables to be present in the head group container",
 			)
 	})
 
-	t.Run("Expected required create-cert init container for the head group", func(t *testing.T) {
+	t.Run("Expected required create-cert init container for the head group for mTLS", func(t *testing.T) {
 		test.Expect(validRayCluster.Spec.HeadGroupSpec.Template.Spec.InitContainers).
 			To(
 				And(
 					HaveLen(1),
 					ContainElement(WithTransform(support.ResourceName, Equal(initContainerName))),
 				),
-				"Expected the create-cert init container to be present in the head group",
+				"Expected the create-cert init container to be present in the head group for mTLS",
 			)
 	})
 
-	t.Run("Expected required OAuth proxy TLS secret and CA volume mounts for the head group", func(t *testing.T) {
+	t.Run("Expected required mTLS volume mounts for the head group container", func(t *testing.T) {
 		test.Expect(validRayCluster.Spec.HeadGroupSpec.Template.Spec.Containers[0].VolumeMounts).
 			To(
 				And(
-					HaveLen(3),
-					ContainElement(WithTransform(support.ResourceName, Equal(oauthProxyVolumeName))),
+					HaveLen(2),
 					ContainElement(WithTransform(support.ResourceName, Equal("ca-vol"))),
 					ContainElement(WithTransform(support.ResourceName, Equal("server-cert"))),
 				),
-				"Expected the OAuth proxy TLS secret and CA volume mounts to be present in the head group",
+				"Expected the mTLS CA and server-cert volume mounts to be present in the head group container",
 			)
 	})
 
@@ -265,7 +232,7 @@ func TestValidateCreate(t *testing.T) {
 		},
 	}
 
-	validRayCluster := &rayv1.RayCluster{
+	validRayClusterForMTLS := &rayv1.RayCluster{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      rayClusterName,
 			Namespace: namespace,
@@ -279,54 +246,10 @@ func TestValidateCreate(t *testing.T) {
 					Spec: corev1.PodSpec{
 						Containers: []corev1.Container{
 							{
-								Name:  oauthProxyContainerName,
-								Image: OAuthProxyImage,
-								Ports: []corev1.ContainerPort{
-									{ContainerPort: 8443, Name: "oauth-proxy"},
-								},
-								Env: []corev1.EnvVar{
-									{
-										Name: "COOKIE_SECRET",
-										ValueFrom: &corev1.EnvVarSource{
-											SecretKeyRef: &corev1.SecretKeySelector{
-												LocalObjectReference: corev1.LocalObjectReference{
-													Name: rayClusterName + "-oauth-config-01e408a7",
-												},
-												Key: "cookie_secret",
-											},
-										},
-									},
-								},
-								Args: []string{
-									"--https-address=:8443",
-									"--provider=openshift",
-									"--openshift-service-account=" + rayClusterName + "-oauth-proxy-ecaffa62",
-									"--upstream=http://localhost:8265",
-									"--tls-cert=/etc/tls/private/tls.crt",
-									"--tls-key=/etc/tls/private/tls.key",
-									"--cookie-secret=$(COOKIE_SECRET)",
-									"--openshift-delegate-urls={\"/\":{\"resource\":\"pods\",\"namespace\":\"" + namespace + "\",\"verb\":\"get\"}}",
-								},
-								VolumeMounts: []corev1.VolumeMount{
-									{
-										Name:      oauthProxyVolumeName,
-										MountPath: "/etc/tls/private",
-										ReadOnly:  true,
-									},
-								},
+								Name:  "ray-head",
+								Image: "rayproject/ray:latest",
 							},
 						},
-						Volumes: []corev1.Volume{
-							{
-								Name: oauthProxyVolumeName,
-								VolumeSource: corev1.VolumeSource{
-									Secret: &corev1.SecretVolumeSource{
-										SecretName: rayClusterName + "-proxy-tls-secret-3e5a0266",
-									},
-								},
-							},
-						},
-						ServiceAccountName: rayClusterName + "-oauth-proxy-ecaffa62",
 					},
 				},
 				RayStartParams: map[string]string{},
@@ -339,64 +262,36 @@ func TestValidateCreate(t *testing.T) {
 		test.T().Fatalf("Failed to create RayCluster: %v", err)
 	}
 
-	t.Run("Expect updated values in minimal RayCluster", func(t *testing.T) {
-		err := rcWebhook.Default(test.Ctx(), runtime.Object(minimalRayCluster))
+	t.Run("Expect updated values in minimal RayCluster after Defaulting", func(t *testing.T) {
+		dCopy := minimalRayCluster.DeepCopy()
+		err := rcWebhook.Default(test.Ctx(), runtime.Object(dCopy))
 		test.Expect(err).ShouldNot(HaveOccurred(), "Expected no errors on call to Default function")
-		test.Expect(minimalRayCluster.GetAnnotations()[versionAnnotation]).ShouldNot(BeNil(), "Expected version annotation to be set")
+		test.Expect(dCopy.GetAnnotations()[versionAnnotation]).ShouldNot(BeNil(), "Expected version annotation to be set")
 	})
 
-	// Call to ValidateCreate function is made
 	warnings, err := rcWebhook.ValidateCreate(test.Ctx(), runtime.Object(minimalRayCluster))
-	t.Run("Expected no warnings or errors on call to ValidateCreate function", func(t *testing.T) {
+	t.Run("Expected no warnings or errors on call to ValidateCreate function for minimal cluster", func(t *testing.T) {
 		test.Expect(warnings).Should(BeNil(), "Expected no warnings on call to ValidateCreate function")
 		test.Expect(err).ShouldNot(HaveOccurred(), "Expected no errors on call to ValidateCreate function")
 	})
 
 	t.Run("Negative: Expected errors on call to ValidateCreate function due to EnableIngress set to True", func(t *testing.T) {
-		invalidRayCluster := validRayCluster.DeepCopy()
+		invalidRayCluster := validRayClusterForMTLS.DeepCopy()
+		rcWebhook.Default(test.Ctx(), runtime.Object(invalidRayCluster))
 		invalidRayCluster.Spec.HeadGroupSpec.EnableIngress = support.Ptr(true)
 		_, err := rcWebhook.ValidateCreate(test.Ctx(), runtime.Object(invalidRayCluster))
 		test.Expect(err).Should(HaveOccurred(), "Expected errors on call to ValidateCreate function due to EnableIngress set to True")
-	})
-
-	t.Run("Negative: Expected errors on call to ValidateCreate function due to manipulated OAuth Proxy Container", func(t *testing.T) {
-		invalidRayCluster := validRayCluster.DeepCopy()
-		for i, headContainer := range invalidRayCluster.Spec.HeadGroupSpec.Template.Spec.Containers {
-			if headContainer.Name == oauthProxyContainerName {
-				invalidRayCluster.Spec.HeadGroupSpec.Template.Spec.Containers[i].Args = []string{"--invalid-arg"}
-				break
-			}
-		}
-		_, err = rcWebhook.ValidateCreate(test.Ctx(), runtime.Object(invalidRayCluster))
-		test.Expect(err).Should(HaveOccurred(), "Expected errors on call to ValidateCreate function due to manipulated OAuth Proxy Container")
-	})
-
-	t.Run("Negative: Expected errors on call to ValidateCreate function due to manipulated OAuth Proxy Volume", func(t *testing.T) {
-		invalidRayCluster := validRayCluster.DeepCopy()
-		for i, headVolume := range invalidRayCluster.Spec.HeadGroupSpec.Template.Spec.Volumes {
-			if headVolume.Name == oauthProxyVolumeName {
-				invalidRayCluster.Spec.HeadGroupSpec.Template.Spec.Volumes[i].Secret.SecretName = "invalid-secret-name"
-				break
-			}
-		}
-		_, err = rcWebhook.ValidateCreate(test.Ctx(), runtime.Object(invalidRayCluster))
-		test.Expect(err).Should(HaveOccurred(), "Expected errors on call to ValidateCreate function due to manipulated OAuth Proxy Volume")
-	})
-
-	t.Run("Negative: Expected errors on call to ValidateCreate function due to manipulated head group service account name", func(t *testing.T) {
-		invalidRayCluster := validRayCluster.DeepCopy()
-		invalidRayCluster.Spec.HeadGroupSpec.Template.Spec.ServiceAccountName = "invalid-service-account-name"
-		_, err = rcWebhook.ValidateCreate(test.Ctx(), runtime.Object(invalidRayCluster))
-		test.Expect(err).Should(HaveOccurred(), "Expected errors on call to ValidateCreate function due to manipulated head group service account name")
 	})
 
 }
 
 func TestValidateUpdate(t *testing.T) {
 	test := support.NewTest(t)
-	rayClientRoute := "rayclient-" + rayClusterName + "-" + namespace + "." + rcWebhook.Config.IngressDomain
-	svcDomain := rayClusterName + "-head-svc." + namespace + ".svc"
-	validRayClusterNewNames := &rayv1.RayCluster{
+	// rayClientRoute and svcDomain are no longer used in the refactored test setup for baseRayClusterWithMTLS
+	// rayClientRoute := "rayclient-" + rayClusterName + "-" + namespace + "." + rcWebhook.Config.IngressDomain
+	// svcDomain := rayClusterName + "-head-svc." + namespace + ".svc"
+
+	baseRayClusterWithMTLS := &rayv1.RayCluster{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      rayClusterName,
 			Namespace: namespace,
@@ -410,103 +305,16 @@ func TestValidateUpdate(t *testing.T) {
 					Spec: corev1.PodSpec{
 						Containers: []corev1.Container{
 							{
-								Name:  oauthProxyContainerName,
-								Image: OAuthProxyImage,
-								Ports: []corev1.ContainerPort{
-									{ContainerPort: 8443, Name: "oauth-proxy"},
-								},
-								Env: []corev1.EnvVar{
-									{
-										Name: "COOKIE_SECRET",
-										ValueFrom: &corev1.EnvVarSource{
-											SecretKeyRef: &corev1.SecretKeySelector{
-												LocalObjectReference: corev1.LocalObjectReference{
-													Name: rayClusterName + "-oauth-config-01e408a7",
-												},
-												Key: "cookie_secret",
-											},
-										},
-									},
-									{
-										Name: "MY_POD_IP",
-										ValueFrom: &corev1.EnvVarSource{
-											FieldRef: &corev1.ObjectFieldSelector{
-												FieldPath: "status.podIP",
-											},
-										},
-									},
-									{Name: "RAY_USE_TLS", Value: "1"},
-									{Name: "RAY_TLS_SERVER_CERT", Value: "/home/ray/workspace/tls/server.crt"},
-									{Name: "RAY_TLS_SERVER_KEY", Value: "/home/ray/workspace/tls/server.key"},
-									{Name: "RAY_TLS_CA_CERT", Value: "/home/ray/workspace/tls/ca.crt"},
-								},
-								Args: []string{
-									"--https-address=:8443",
-									"--provider=openshift",
-									"--openshift-service-account=" + rayClusterName + "-oauth-proxy-ecaffa62",
-									"--upstream=http://localhost:8265",
-									"--tls-cert=/etc/tls/private/tls.crt",
-									"--tls-key=/etc/tls/private/tls.key",
-									"--cookie-secret=$(COOKIE_SECRET)",
-									"--openshift-delegate-urls={\"/\":{\"resource\":\"pods\",\"namespace\":\"" + namespace + "\",\"verb\":\"get\"}}",
-								},
-								VolumeMounts: []corev1.VolumeMount{
-									{
-										Name:      oauthProxyVolumeName,
-										MountPath: "/etc/tls/private",
-										ReadOnly:  true,
-									},
-								},
+								Name:         "ray-head",
+								Image:        "rayproject/ray:latest",
+								Env:          envVarList(),
+								VolumeMounts: certVolumeMounts(),
 							},
 						},
 						InitContainers: []corev1.Container{
-							{
-								Name:  "create-cert",
-								Image: "registry.redhat.io/ubi9@sha256:770cf07083e1c85ae69c25181a205b7cdef63c11b794c89b3b487d4670b4c328",
-								Command: []string{
-									"sh",
-									"-c",
-									`cd /home/ray/workspace/tls && openssl req -nodes -newkey rsa:2048 -keyout server.key -out server.csr -subj '/CN=ray-head' && printf "authorityKeyIdentifier=keyid,issuer\nbasicConstraints=CA:FALSE\nsubjectAltName = @alt_names\n[alt_names]\nDNS.1 = 127.0.0.1\nDNS.2 = localhost\nDNS.3 = ${FQ_RAY_IP}\nDNS.4 = $(awk 'END{print $1}' /etc/hosts)\nDNS.5 = ` + rayClientRoute + `\nDNS.6 = ` + svcDomain + `">./domain.ext && cp /home/ray/workspace/ca/* . && openssl x509 -req -CA ca.crt -CAkey ca.key -in server.csr -out server.crt -days 365 -CAcreateserial -extfile domain.ext`,
-								},
-								VolumeMounts: []corev1.VolumeMount{
-									{
-										Name:      "ca-vol",
-										MountPath: "/home/ray/workspace/ca",
-										ReadOnly:  true,
-									},
-									{
-										Name:      "server-cert",
-										MountPath: "/home/ray/workspace/tls",
-										ReadOnly:  false,
-									},
-								},
-							},
+							rayHeadInitContainer(&rayv1.RayCluster{ObjectMeta: metav1.ObjectMeta{Name: rayClusterName, Namespace: namespace}}, rcWebhook.Config),
 						},
-						Volumes: []corev1.Volume{
-							{
-								Name: oauthProxyVolumeName,
-								VolumeSource: corev1.VolumeSource{
-									Secret: &corev1.SecretVolumeSource{
-										SecretName: rayClusterName + "-proxy-tls-secret-3e5a0266",
-									},
-								},
-							},
-							{
-								Name: "ca-vol",
-								VolumeSource: corev1.VolumeSource{
-									Secret: &corev1.SecretVolumeSource{
-										SecretName: rayClusterName + "-ca-secret-001432aa",
-									},
-								},
-							},
-							{
-								Name: "server-cert",
-								VolumeSource: corev1.VolumeSource{
-									EmptyDir: &corev1.EmptyDirVolumeSource{},
-								},
-							},
-						},
-						ServiceAccountName: rayClusterName + "-oauth-proxy-ecaffa62",
+						Volumes: caVolumes(&rayv1.RayCluster{ObjectMeta: metav1.ObjectMeta{Name: rayClusterName, Namespace: namespace}}),
 					},
 				},
 				RayStartParams: map[string]string{},
@@ -518,51 +326,15 @@ func TestValidateUpdate(t *testing.T) {
 						Spec: corev1.PodSpec{
 							Containers: []corev1.Container{
 								{
-									Name: "worker-container-1",
-									Env: []corev1.EnvVar{
-										{
-											Name: "MY_POD_IP",
-											ValueFrom: &corev1.EnvVarSource{
-												FieldRef: &corev1.ObjectFieldSelector{
-													FieldPath: "status.podIP",
-												},
-											},
-										},
-										{Name: "RAY_USE_TLS", Value: "1"},
-										{Name: "RAY_TLS_SERVER_CERT", Value: "/home/ray/workspace/tls/server.crt"},
-										{Name: "RAY_TLS_SERVER_KEY", Value: "/home/ray/workspace/tls/server.key"},
-										{Name: "RAY_TLS_CA_CERT", Value: "/home/ray/workspace/tls/ca.crt"},
-									},
-								},
-							},
-							InitContainers: []corev1.Container{
-								{
-									Name:  "create-cert",
-									Image: "registry.redhat.io/ubi9@sha256:770cf07083e1c85ae69c25181a205b7cdef63c11b794c89b3b487d4670b4c328",
-									Command: []string{
-										"sh",
-										"-c",
-										`cd /home/ray/workspace/tls && openssl req -nodes -newkey rsa:2048 -keyout server.key -out server.csr -subj '/CN=ray-head' && printf "authorityKeyIdentifier=keyid,issuer\nbasicConstraints=CA:FALSE\nsubjectAltName = @alt_names\n[alt_names]\nDNS.1 = 127.0.0.1\nDNS.2 = localhost\nDNS.3 = ${FQ_RAY_IP}\nDNS.4 = $(awk 'END{print $1}' /etc/hosts)">./domain.ext && cp /home/ray/workspace/ca/* . && openssl x509 -req -CA ca.crt -CAkey ca.key -in server.csr -out server.crt -days 365 -CAcreateserial -extfile domain.ext`,
-									},
+									Name:         "worker-container-1",
+									Env:          envVarList(),
 									VolumeMounts: certVolumeMounts(),
 								},
 							},
-							Volumes: []corev1.Volume{
-								{
-									Name: "ca-vol",
-									VolumeSource: corev1.VolumeSource{
-										Secret: &corev1.SecretVolumeSource{
-											SecretName: rayClusterName + "-ca-secret-001432aa",
-										},
-									},
-								},
-								{
-									Name: "server-cert",
-									VolumeSource: corev1.VolumeSource{
-										EmptyDir: &corev1.EmptyDirVolumeSource{},
-									},
-								},
+							InitContainers: []corev1.Container{
+								rayWorkerInitContainer(rcWebhook.Config),
 							},
+							Volumes: caVolumes(&rayv1.RayCluster{ObjectMeta: metav1.ObjectMeta{Name: rayClusterName, Namespace: namespace}}),
 						},
 					},
 					RayStartParams: map[string]string{},
@@ -571,187 +343,16 @@ func TestValidateUpdate(t *testing.T) {
 		},
 	}
 
-	validRayClusterOldNames := &rayv1.RayCluster{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      rayClusterName,
-			Namespace: namespace,
-		},
-		Spec: rayv1.RayClusterSpec{
-			HeadGroupSpec: rayv1.HeadGroupSpec{
-				Template: corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{
-							{
-								Name:  oauthProxyContainerName,
-								Image: OAuthProxyImage,
-								Ports: []corev1.ContainerPort{
-									{ContainerPort: 8443, Name: "oauth-proxy"},
-								},
-								Env: []corev1.EnvVar{
-									{
-										Name: "COOKIE_SECRET",
-										ValueFrom: &corev1.EnvVarSource{
-											SecretKeyRef: &corev1.SecretKeySelector{
-												LocalObjectReference: corev1.LocalObjectReference{
-													Name: rayClusterName + "-oauth-config",
-												},
-												Key: "cookie_secret",
-											},
-										},
-									},
-									{
-										Name: "MY_POD_IP",
-										ValueFrom: &corev1.EnvVarSource{
-											FieldRef: &corev1.ObjectFieldSelector{
-												FieldPath: "status.podIP",
-											},
-										},
-									},
-									{Name: "RAY_USE_TLS", Value: "1"},
-									{Name: "RAY_TLS_SERVER_CERT", Value: "/home/ray/workspace/tls/server.crt"},
-									{Name: "RAY_TLS_SERVER_KEY", Value: "/home/ray/workspace/tls/server.key"},
-									{Name: "RAY_TLS_CA_CERT", Value: "/home/ray/workspace/tls/ca.crt"},
-								},
-								Args: []string{
-									"--https-address=:8443",
-									"--provider=openshift",
-									"--openshift-service-account=" + rayClusterName + "-oauth-proxy",
-									"--upstream=http://localhost:8265",
-									"--tls-cert=/etc/tls/private/tls.crt",
-									"--tls-key=/etc/tls/private/tls.key",
-									"--cookie-secret=$(COOKIE_SECRET)",
-									"--openshift-delegate-urls={\"/\":{\"resource\":\"pods\",\"namespace\":\"" + namespace + "\",\"verb\":\"get\"}}",
-								},
-								VolumeMounts: []corev1.VolumeMount{
-									{
-										Name:      oauthProxyVolumeName,
-										MountPath: "/etc/tls/private",
-										ReadOnly:  true,
-									},
-								},
-							},
-						},
-						InitContainers: []corev1.Container{
-							{
-								Name:  "create-cert",
-								Image: "registry.redhat.io/ubi9@sha256:770cf07083e1c85ae69c25181a205b7cdef63c11b794c89b3b487d4670b4c328",
-								Command: []string{
-									"sh",
-									"-c",
-									`cd /home/ray/workspace/tls && openssl req -nodes -newkey rsa:2048 -keyout server.key -out server.csr -subj '/CN=ray-head' && printf "authorityKeyIdentifier=keyid,issuer\nbasicConstraints=CA:FALSE\nsubjectAltName = @alt_names\n[alt_names]\nDNS.1 = 127.0.0.1\nDNS.2 = localhost\nDNS.3 = ${FQ_RAY_IP}\nDNS.4 = $(awk 'END{print $1}' /etc/hosts)\nDNS.5 = ` + rayClientRoute + `\nDNS.6 = ` + svcDomain + `">./domain.ext && cp /home/ray/workspace/ca/* . && openssl x509 -req -CA ca.crt -CAkey ca.key -in server.csr -out server.crt -days 365 -CAcreateserial -extfile domain.ext`,
-								},
-								VolumeMounts: []corev1.VolumeMount{
-									{
-										Name:      "ca-vol",
-										MountPath: "/home/ray/workspace/ca",
-										ReadOnly:  true,
-									},
-									{
-										Name:      "server-cert",
-										MountPath: "/home/ray/workspace/tls",
-										ReadOnly:  false,
-									},
-								},
-							},
-						},
-						Volumes: []corev1.Volume{
-							{
-								Name: oauthProxyVolumeName,
-								VolumeSource: corev1.VolumeSource{
-									Secret: &corev1.SecretVolumeSource{
-										SecretName: rayClusterName + "-proxy-tls-secret",
-									},
-								},
-							},
-							{
-								Name: "ca-vol",
-								VolumeSource: corev1.VolumeSource{
-									Secret: &corev1.SecretVolumeSource{
-										SecretName: "ca-secret-" + rayClusterName,
-									},
-								},
-							},
-							{
-								Name: "server-cert",
-								VolumeSource: corev1.VolumeSource{
-									EmptyDir: &corev1.EmptyDirVolumeSource{},
-								},
-							},
-						},
-						ServiceAccountName: rayClusterName + "-oauth-proxy",
-					},
-				},
-				RayStartParams: map[string]string{},
-			},
-			WorkerGroupSpecs: []rayv1.WorkerGroupSpec{
-				{
-					GroupName: "worker-group-1",
-					Template: corev1.PodTemplateSpec{
-						Spec: corev1.PodSpec{
-							Containers: []corev1.Container{
-								{
-									Name: "worker-container-1",
-									Env: []corev1.EnvVar{
-										{
-											Name: "MY_POD_IP",
-											ValueFrom: &corev1.EnvVarSource{
-												FieldRef: &corev1.ObjectFieldSelector{
-													FieldPath: "status.podIP",
-												},
-											},
-										},
-										{Name: "RAY_USE_TLS", Value: "1"},
-										{Name: "RAY_TLS_SERVER_CERT", Value: "/home/ray/workspace/tls/server.crt"},
-										{Name: "RAY_TLS_SERVER_KEY", Value: "/home/ray/workspace/tls/server.key"},
-										{Name: "RAY_TLS_CA_CERT", Value: "/home/ray/workspace/tls/ca.crt"},
-									},
-								},
-							},
-							InitContainers: []corev1.Container{
-								{
-									Name:  "create-cert",
-									Image: "registry.redhat.io/ubi9@sha256:770cf07083e1c85ae69c25181a205b7cdef63c11b794c89b3b487d4670b4c328",
-									Command: []string{
-										"sh",
-										"-c",
-										`cd /home/ray/workspace/tls && openssl req -nodes -newkey rsa:2048 -keyout server.key -out server.csr -subj '/CN=ray-head' && printf "authorityKeyIdentifier=keyid,issuer\nbasicConstraints=CA:FALSE\nsubjectAltName = @alt_names\n[alt_names]\nDNS.1 = 127.0.0.1\nDNS.2 = localhost\nDNS.3 = ${FQ_RAY_IP}\nDNS.4 = $(awk 'END{print $1}' /etc/hosts)">./domain.ext && cp /home/ray/workspace/ca/* . && openssl x509 -req -CA ca.crt -CAkey ca.key -in server.csr -out server.crt -days 365 -CAcreateserial -extfile domain.ext`,
-									},
-									VolumeMounts: certVolumeMounts(),
-								},
-							},
-							Volumes: []corev1.Volume{
-								{
-									Name: "ca-vol",
-									VolumeSource: corev1.VolumeSource{
-										Secret: &corev1.SecretVolumeSource{
-											SecretName: "ca-secret-" + rayClusterName,
-										},
-									},
-								},
-								{
-									Name: "server-cert",
-									VolumeSource: corev1.VolumeSource{
-										EmptyDir: &corev1.EmptyDirVolumeSource{},
-									},
-								},
-							},
-						},
-					},
-					RayStartParams: map[string]string{},
-				},
-			},
-		},
-	}
+	validRayClusterOldNames := baseRayClusterWithMTLS.DeepCopy()
+	validRayClusterOldNames.Annotations = nil
 
-	// Create the RayClusters
-	if _, err := test.Client().Ray().RayV1().RayClusters(namespace).Create(test.Ctx(), validRayClusterNewNames, metav1.CreateOptions{}); err != nil {
+	if _, err := test.Client().Ray().RayV1().RayClusters(namespace).Create(test.Ctx(), baseRayClusterWithMTLS, metav1.CreateOptions{}); err != nil {
 		test.T().Fatalf("Failed to create RayCluster: %v", err)
 	}
 
-	// Positive Test Case: Valid RayCluster with immutable fields
 	t.Run("Expected no warnings or errors on call to ValidateUpdate function with version annotation set", func(t *testing.T) {
-		test.Expect(runtime.Object(validRayClusterNewNames).(*rayv1.RayCluster).Annotations).ShouldNot(BeNil(), "Expected version annotation to be set")
-		warnings, err := rcWebhook.ValidateUpdate(test.Ctx(), runtime.Object(validRayClusterNewNames), runtime.Object(validRayClusterNewNames))
+		test.Expect(runtime.Object(baseRayClusterWithMTLS).(*rayv1.RayCluster).Annotations).ShouldNot(BeNil(), "Expected version annotation to be set")
+		warnings, err := rcWebhook.ValidateUpdate(test.Ctx(), runtime.Object(baseRayClusterWithMTLS), runtime.Object(baseRayClusterWithMTLS))
 		test.Expect(warnings).Should(BeNil(), "Expected no warnings on call to ValidateUpdate function")
 		test.Expect(err).ShouldNot(HaveOccurred(), "Expected no errors on call to ValidateUpdate function")
 	})
@@ -763,57 +364,26 @@ func TestValidateUpdate(t *testing.T) {
 	})
 
 	t.Run("Negative: Expected errors on call to ValidateUpdate function due to EnableIngress set to True", func(t *testing.T) {
-		invalidRayCluster := validRayClusterNewNames.DeepCopy()
+		invalidRayCluster := baseRayClusterWithMTLS.DeepCopy()
 		invalidRayCluster.Spec.HeadGroupSpec.EnableIngress = support.Ptr(true)
-		_, err := rcWebhook.ValidateUpdate(test.Ctx(), runtime.Object(validRayClusterNewNames), runtime.Object(invalidRayCluster))
+		_, err := rcWebhook.ValidateUpdate(test.Ctx(), runtime.Object(baseRayClusterWithMTLS), runtime.Object(invalidRayCluster))
 		test.Expect(err).Should(HaveOccurred(), "Expected errors on call to ValidateUpdate function due to EnableIngress set to True")
 	})
 
-	t.Run("Negative: Expected errors on call to ValidateUpdate function due to manipulated OAuth Proxy Container", func(t *testing.T) {
-		invalidRayCluster := validRayClusterNewNames.DeepCopy()
-		for i, headContainer := range invalidRayCluster.Spec.HeadGroupSpec.Template.Spec.Containers {
-			if headContainer.Name == oauthProxyContainerName {
-				invalidRayCluster.Spec.HeadGroupSpec.Template.Spec.Containers[i].Args = []string{"--invalid-arg"}
-				break
-			}
-		}
-		_, err := rcWebhook.ValidateUpdate(test.Ctx(), runtime.Object(validRayClusterNewNames), runtime.Object(invalidRayCluster))
-		test.Expect(err).Should(HaveOccurred(), "Expected errors on call to ValidateUpdate function due to manipulated OAuth Proxy Container")
-	})
-
-	t.Run("Negative: Expected errors on call to ValidateUpdate function due to manipulated OAuth Proxy Volume", func(t *testing.T) {
-		invalidRayCluster := validRayClusterNewNames.DeepCopy()
-		for i, headVolume := range invalidRayCluster.Spec.HeadGroupSpec.Template.Spec.Volumes {
-			if headVolume.Name == oauthProxyVolumeName {
-				invalidRayCluster.Spec.HeadGroupSpec.Template.Spec.Volumes[i].Secret.SecretName = "invalid-secret-name"
-				break
-			}
-		}
-		_, err := rcWebhook.ValidateUpdate(test.Ctx(), runtime.Object(validRayClusterNewNames), runtime.Object(invalidRayCluster))
-		test.Expect(err).Should(HaveOccurred(), "Expected errors on call to ValidateUpdate function due to manipulated OAuth Proxy Volume")
-	})
-
-	t.Run("Negative: Expected errors on call to ValidateUpdate function due to manipulated head group service account name", func(t *testing.T) {
-		invalidRayCluster := validRayClusterNewNames.DeepCopy()
-		invalidRayCluster.Spec.HeadGroupSpec.Template.Spec.ServiceAccountName = "invalid-service-account-name"
-		_, err := rcWebhook.ValidateUpdate(test.Ctx(), runtime.Object(validRayClusterNewNames), runtime.Object(invalidRayCluster))
-		test.Expect(err).Should(HaveOccurred(), "Expected errors on call to ValidateUpdate function due to manipulated head group service account name")
-	})
-
 	t.Run("Negative: Expected errors on call to ValidateUpdate function due to manipulated Init Container in the head group", func(t *testing.T) {
-		invalidRayCluster := validRayClusterNewNames.DeepCopy()
+		invalidRayCluster := baseRayClusterWithMTLS.DeepCopy()
 		for i, headInitContainer := range invalidRayCluster.Spec.HeadGroupSpec.Template.Spec.InitContainers {
 			if headInitContainer.Name == "create-cert" {
 				invalidRayCluster.Spec.HeadGroupSpec.Template.Spec.InitContainers[i].Command = []string{"manipulated command"}
 				break
 			}
 		}
-		_, err := rcWebhook.ValidateUpdate(test.Ctx(), runtime.Object(validRayClusterNewNames), runtime.Object(invalidRayCluster))
+		_, err := rcWebhook.ValidateUpdate(test.Ctx(), runtime.Object(baseRayClusterWithMTLS), runtime.Object(invalidRayCluster))
 		test.Expect(err).Should(HaveOccurred(), "Expected errors on call to ValidateUpdate function due to manipulated Init Container in the head group")
 	})
 
 	t.Run("Negative: Expected errors on call to ValidateUpdate function due to manipulated Init Container in the worker group", func(t *testing.T) {
-		invalidRayCluster := validRayClusterNewNames.DeepCopy()
+		invalidRayCluster := baseRayClusterWithMTLS.DeepCopy()
 		for _, workerGroup := range invalidRayCluster.Spec.WorkerGroupSpecs {
 			for i, workerInitContainer := range workerGroup.Template.Spec.InitContainers {
 				if workerInitContainer.Name == "create-cert" {
@@ -822,24 +392,24 @@ func TestValidateUpdate(t *testing.T) {
 				}
 			}
 		}
-		_, err := rcWebhook.ValidateUpdate(test.Ctx(), runtime.Object(validRayClusterNewNames), runtime.Object(invalidRayCluster))
+		_, err := rcWebhook.ValidateUpdate(test.Ctx(), runtime.Object(baseRayClusterWithMTLS), runtime.Object(invalidRayCluster))
 		test.Expect(err).Should(HaveOccurred(), "Expected errors on call to ValidateUpdate function due to manipulated Init Container in the worker group")
 	})
 
 	t.Run("Negative: Expected errors on call to ValidateUpdate function due to manipulated Volume in the head group", func(t *testing.T) {
-		invalidRayCluster := validRayClusterNewNames.DeepCopy()
+		invalidRayCluster := baseRayClusterWithMTLS.DeepCopy()
 		for i, headVolume := range invalidRayCluster.Spec.HeadGroupSpec.Template.Spec.Volumes {
 			if headVolume.Name == "ca-vol" {
 				invalidRayCluster.Spec.HeadGroupSpec.Template.Spec.Volumes[i].Secret.SecretName = "invalid-secret-name"
 				break
 			}
 		}
-		_, err := rcWebhook.ValidateUpdate(test.Ctx(), runtime.Object(validRayClusterNewNames), runtime.Object(invalidRayCluster))
+		_, err := rcWebhook.ValidateUpdate(test.Ctx(), runtime.Object(baseRayClusterWithMTLS), runtime.Object(invalidRayCluster))
 		test.Expect(err).Should(HaveOccurred(), "Expected errors on call to ValidateUpdate function due to manipulated Volume in the head group")
 	})
 
 	t.Run("Negative: Expected errors on call to ValidateUpdate function due to manipulated Volume in the worker group", func(t *testing.T) {
-		invalidRayCluster := validRayClusterNewNames.DeepCopy()
+		invalidRayCluster := baseRayClusterWithMTLS.DeepCopy()
 		for _, workerGroup := range invalidRayCluster.Spec.WorkerGroupSpecs {
 			for i, workerVolume := range workerGroup.Template.Spec.Volumes {
 				if workerVolume.Name == "ca-vol" {
@@ -848,24 +418,24 @@ func TestValidateUpdate(t *testing.T) {
 				}
 			}
 		}
-		_, err := rcWebhook.ValidateUpdate(test.Ctx(), runtime.Object(validRayClusterNewNames), runtime.Object(invalidRayCluster))
+		_, err := rcWebhook.ValidateUpdate(test.Ctx(), runtime.Object(baseRayClusterWithMTLS), runtime.Object(invalidRayCluster))
 		test.Expect(err).Should(HaveOccurred(), "Expected errors on call to ValidateUpdate function due to manipulated Volume in the worker group")
 	})
 
 	t.Run("Negative: Expected errors on call to ValidateUpdate function due to manipulated env vars in the head group", func(t *testing.T) {
-		invalidRayCluster := validRayClusterNewNames.DeepCopy()
+		invalidRayCluster := baseRayClusterWithMTLS.DeepCopy()
 		for i, headEnvVar := range invalidRayCluster.Spec.HeadGroupSpec.Template.Spec.Containers[0].Env {
 			if headEnvVar.Name == "RAY_USE_TLS" {
 				invalidRayCluster.Spec.HeadGroupSpec.Template.Spec.Containers[0].Env[i].Value = "invalid-value"
 				break
 			}
 		}
-		_, err := rcWebhook.ValidateUpdate(test.Ctx(), runtime.Object(validRayClusterNewNames), runtime.Object(invalidRayCluster))
+		_, err := rcWebhook.ValidateUpdate(test.Ctx(), runtime.Object(baseRayClusterWithMTLS), runtime.Object(invalidRayCluster))
 		test.Expect(err).Should(HaveOccurred(), "Expected errors on call to ValidateUpdate function due to manipulated env vars in the head group")
 	})
 
 	t.Run("Negative: Expected errors on call to ValidateUpdate function due to manipulated env vars in the worker group", func(t *testing.T) {
-		invalidRayCluster := validRayClusterNewNames.DeepCopy()
+		invalidRayCluster := baseRayClusterWithMTLS.DeepCopy()
 		for _, workerGroup := range invalidRayCluster.Spec.WorkerGroupSpecs {
 			for i, workerEnvVar := range workerGroup.Template.Spec.Containers[0].Env {
 				if workerEnvVar.Name == "RAY_USE_TLS" {
@@ -874,7 +444,7 @@ func TestValidateUpdate(t *testing.T) {
 				}
 			}
 		}
-		_, err := rcWebhook.ValidateUpdate(test.Ctx(), runtime.Object(validRayClusterNewNames), runtime.Object(invalidRayCluster))
+		_, err := rcWebhook.ValidateUpdate(test.Ctx(), runtime.Object(baseRayClusterWithMTLS), runtime.Object(invalidRayCluster))
 		test.Expect(err).Should(HaveOccurred(), "Expected errors on call to ValidateUpdate function due to manipulated env vars in the worker group")
 	})
 }

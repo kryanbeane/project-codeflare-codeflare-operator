@@ -45,58 +45,16 @@ type AppWrapperConfiguration struct {
 }
 
 type KubeRayConfiguration struct {
-	RayDashboardOAuthEnabled *bool `json:"rayDashboardOAuthEnabled,omitempty"`
-
-	IngressDomain string `json:"ingressDomain"`
-
-	MTLSEnabled *bool `json:"mTLSEnabled,omitempty"`
+	// Ingress domain for OpenShift Route an Ingress hostnames
+	IngressDomain string `json:"ingressDomain,omitempty"`
+	// Configuration for enabling mTLS
+	MTLSEnabled *bool `json:"mtlsEnabled,omitempty"`
+	// EnableIstio determines whether Istio is enabled in the cluster.
+	// If true, the operator will configure Kiali and Jaeger to monitor Ray clusters.
+	EnableIstio *bool `json:"enableIstio,omitempty"`
 }
 
 type ControllerManager struct {
 	// Metrics contains the controller metrics configuration
 	// +optional
-	Metrics MetricsConfiguration `json:"metrics,omitempty"`
-
-	// Health contains the controller health configuration
-	// +optional
-	Health HealthConfiguration `json:"health,omitempty"`
-
-	// LeaderElection is the LeaderElection config to be used when configuring
-	// the manager.Manager leader election
-	LeaderElection *configv1alpha1.LeaderElectionConfiguration `json:"leaderElection,omitempty"`
-}
-
-type ClientConnection struct {
-	// QPS controls the number of queries per second allowed before client-side throttling
-	// connection to the API server.
-	QPS *float32 `json:"qps,omitempty"`
-
-	// Burst allows extra queries to accumulate when a client is exceeding its rate.
-	Burst *int32 `json:"burst,omitempty"`
-}
-
-// MetricsConfiguration defines the metrics configuration.
-type MetricsConfiguration struct {
-	// BindAddress is the TCP address that the controller should bind to
-	// for serving Prometheus metrics.
-	// It can be set to "0" to disable the metrics serving.
-	// +optional
-	BindAddress string `json:"bindAddress,omitempty"`
-}
-
-// HealthConfiguration defines the health configuration.
-type HealthConfiguration struct {
-	// BindAddress is the TCP address that the controller should bind to
-	// for serving health probes.
-	// It can be set to "0" or "" to disable serving the health probe.
-	// +optional
-	BindAddress string `json:"bindAddress,omitempty"`
-
-	// ReadinessEndpointName, defaults to "readyz"
-	// +optional
-	ReadinessEndpointName string `json:"readinessEndpointName,omitempty"`
-
-	// LivenessEndpointName, defaults to "healthz"
-	// +optional
-	LivenessEndpointName string `json:"livenessEndpointName,omitempty"`
-}
+	Metrics MetricsConfiguration `

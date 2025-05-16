@@ -5,7 +5,7 @@ metadata:
 data:
   config.yaml: |
     kuberay:
-      rayDashboardOAuthEnabled: false
-      ingressDomain: "kind"
+      ingressDomain: ""
+      mtlsEnabled: false
     appwrapper:
       enabled: true
