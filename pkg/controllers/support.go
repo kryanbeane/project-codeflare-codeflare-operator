@@ -51,9 +51,10 @@ func desiredRayClientIngress(cluster *rayv1.RayCluster, ingressHost string) *net
 	return networkingv1ac.Ingress(rayClientNameFromCluster(cluster), cluster.Namespace).
 		WithLabels(map[string]string{RayClusterNameLabel: cluster.Name}).
 		WithAnnotations(map[string]string{
-			"nginx.ingress.kubernetes.io/rewrite-target":  "/",
-			"nginx.ingress.kubernetes.io/ssl-redirect":    "true",
-			"nginx.ingress.kubernetes.io/ssl-passthrough": "true",
+			"nginx.ingress.kubernetes.io/rewrite-target":   "/",
+			"nginx.ingress.kubernetes.io/ssl-redirect":     "true",
+			"nginx.ingress.kubernetes.io/ssl-passthrough":  "true",
+			"nginx.ingress.kubernetes.io/backend-protocol": "GRPC",
 		}).
 		WithOwnerReferences(ownerRefForRayCluster(cluster)).
 		WithSpec(networkingv1ac.IngressSpec().
